@@ -5,6 +5,53 @@ import fs from 'fs';
 
 const execPromise = util.promisify(exec);
 
+export function getFfmpegPath(): string {
+  if (process.env.FFMPEG_PATH && fs.existsSync(process.env.FFMPEG_PATH)) {
+    return `"${process.env.FFMPEG_PATH}"`;
+  }
+  const wingetPkg = path.join(
+    process.env.LOCALAPPDATA || '',
+    'Microsoft',
+    'WinGet',
+    'Packages',
+    'Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe',
+    'ffmpeg-9.0.2-full_build',
+    'bin',
+    'ffmpeg.exe'
+  );
+  if (fs.existsSync(wingetPkg)) return `"${wingetPkg}"`;
+
+  const wingetLink = path.join(process.env.LOCALAPPDATA || '', 'Microsoft', 'WinGet', 'Links', 'ffmpeg.exe');
+  if (fs.existsSync(wingetLink)) return `"${wingetLink}"`;
+
+  const staticBin = path.join(process.cwd(), 'node_modules', 'ffmpeg-static', 'ffmpeg.exe');
+  if (fs.existsSync(staticBin)) return `"${staticBin}"`;
+
+  return 'ffmpeg';
+}
+
+export function getFfprobePath(): string {
+  if (process.env.FFPROBE_PATH && fs.existsSync(process.env.FFPROBE_PATH)) {
+    return `"${process.env.FFPROBE_PATH}"`;
+  }
+  const wingetPkg = path.join(
+    process.env.LOCALAPPDATA || '',
+    'Microsoft',
+    'WinGet',
+    'Packages',
+    'Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe',
+    'ffmpeg-9.0.2-full_build',
+    'bin',
+    'ffprobe.exe'
+  );
+  if (fs.existsSync(wingetPkg)) return `"${wingetPkg}"`;
+
+  const wingetLink = path.join(process.env.LOCALAPPDATA || '', 'Microsoft', 'WinGet', 'Links', 'ffprobe.exe');
+  if (fs.existsSync(wingetLink)) return `"${wingetLink}"`;
+
+  return 'ffprobe';
+}
+
 export interface VideoMetadata {
   duration: number; // in seconds
   width: number;
@@ -27,7 +74,7 @@ export class VideoProcessor {
 
     try {
       const { stdout } = await execPromise(
-        `ffprobe -v quiet -print_format json -show_format -show_streams "${filePath}"`
+        `${getFfprobePath()} -v quiet -print_format json -show_format -show_streams "${filePath}"`
       );
       const data = JSON.parse(stdout);
 
@@ -137,7 +184,7 @@ export class VideoProcessor {
 
     for (const t of clampedCandidates) {
       try {
-        const cmd = `ffmpeg -y -ss ${t.toFixed(2)} -i "${videoPath}" -vframes 1 -vf "scale=64:36,format=rgb24" -f rawvideo - 2>/dev/null`;
+        const cmd = `${getFfmpegPath()} -y -ss ${t.toFixed(2)} -i "${videoPath}" -vframes 1 -vf "scale=64:36,format=rgb24" -f rawvideo -`;
         const { stdout } = await execPromise(cmd, { encoding: 'buffer', maxBuffer: 1024 * 1024 });
         if (!stdout || stdout.length < 64 * 36 * 3) continue;
 
@@ -193,13 +240,13 @@ export class VideoProcessor {
 
     try {
       const targetTime = Math.max(0, timeSec);
-      const cmd = `ffmpeg -y -ss ${targetTime.toFixed(2)} -i "${inputPath}" -vframes 1 -q:v 2 -vf "scale=640:-2,format=yuv420p" "${outputPath}"`;
+      const cmd = `${getFfmpegPath()} -y -ss ${targetTime.toFixed(2)} -i "${inputPath}" -vframes 1 -q:v 2 -vf "scale=640:-2,format=yuv420p" "${outputPath}"`;
       await execPromise(cmd);
       return outputPath;
     } catch (err: any) {
       console.warn('FFmpeg thumbnail extraction warning, falling back to frame 0:', err.message);
       // Fallback to the very first frame
-      const fallbackCmd = `ffmpeg -y -i "${inputPath}" -vframes 1 -q:v 2 -vf "scale=640:-2,format=yuv420p" "${outputPath}"`;
+      const fallbackCmd = `${getFfmpegPath()} -y -i "${inputPath}" -vframes 1 -q:v 2 -vf "scale=640:-2,format=yuv420p" "${outputPath}"`;
       await execPromise(fallbackCmd);
       return outputPath;
     }
@@ -247,13 +294,15 @@ export class VideoProcessor {
   }
 
   /**
-   * Trim video section to a real output file
+   * Trim video section to a real output file with optional aspect adaptation and background blur
    */
   public async trimVideo(options: {
     inputPath: string;
     outputPath: string;
     startTime: number;
     endTime: number;
+    targetAspect?: '9:16' | '1:1' | '16:9';
+    blurBackground?: boolean;
   }): Promise<string> {
     if (!fs.existsSync(options.inputPath)) {
       throw new Error(`Source video not found: ${options.inputPath}`);
@@ -267,8 +316,42 @@ export class VideoProcessor {
       throw new Error(`Trim end time (${end}s) must be at least 0.2s after start time (${start}s)`);
     }
 
+    const ffmpeg = getFfmpegPath();
+    const aspect = options.targetAspect;
+
+    if (aspect === '9:16') {
+      if (options.blurBackground) {
+        const filter = `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:5[bg];[0:v]scale=1080:1920:force_original_aspect_ratio=decrease[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2[v]`;
+        const cmd = `${ffmpeg} -y -ss ${start.toFixed(2)} -i "${options.inputPath}" -t ${duration.toFixed(2)} -filter_complex "${filter}" -map "[v]" -map 0:a? -c:v libx264 -preset fast -crf 22 -c:a aac -b:a 192k -movflags +faststart "${options.outputPath}"`;
+        await execPromise(cmd);
+        return options.outputPath;
+      } else {
+        const filter = `scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black`;
+        const cmd = `${ffmpeg} -y -ss ${start.toFixed(2)} -i "${options.inputPath}" -t ${duration.toFixed(2)} -vf "${filter}" -c:v libx264 -preset fast -crf 22 -c:a aac -b:a 192k -movflags +faststart "${options.outputPath}"`;
+        await execPromise(cmd);
+        return options.outputPath;
+      }
+    } else if (aspect === '1:1') {
+      if (options.blurBackground) {
+        const filter = `[0:v]scale=1080:1080:force_original_aspect_ratio=increase,crop=1080:1080,boxblur=20:5[bg];[0:v]scale=1080:1080:force_original_aspect_ratio=decrease[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2[v]`;
+        const cmd = `${ffmpeg} -y -ss ${start.toFixed(2)} -i "${options.inputPath}" -t ${duration.toFixed(2)} -filter_complex "${filter}" -map "[v]" -map 0:a? -c:v libx264 -preset fast -crf 22 -c:a aac -b:a 192k -movflags +faststart "${options.outputPath}"`;
+        await execPromise(cmd);
+        return options.outputPath;
+      } else {
+        const filter = `scale=1080:1080:force_original_aspect_ratio=decrease,pad=1080:1080:(ow-iw)/2:(oh-ih)/2:black`;
+        const cmd = `${ffmpeg} -y -ss ${start.toFixed(2)} -i "${options.inputPath}" -t ${duration.toFixed(2)} -vf "${filter}" -c:v libx264 -preset fast -crf 22 -c:a aac -b:a 192k -movflags +faststart "${options.outputPath}"`;
+        await execPromise(cmd);
+        return options.outputPath;
+      }
+    } else if (aspect === '16:9') {
+      const filter = `scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black`;
+      const cmd = `${ffmpeg} -y -ss ${start.toFixed(2)} -i "${options.inputPath}" -t ${duration.toFixed(2)} -vf "${filter}" -c:v libx264 -preset fast -crf 22 -c:a aac -b:a 192k -movflags +faststart "${options.outputPath}"`;
+      await execPromise(cmd);
+      return options.outputPath;
+    }
+
     // Accurate seek and re-encode to ensure keyframe alignment and audio sync
-    const cmd = `ffmpeg -y -ss ${start.toFixed(2)} -i "${options.inputPath}" -t ${duration.toFixed(2)} -c:v libx264 -preset fast -crf 22 -c:a aac -b:a 192k -movflags +faststart "${options.outputPath}"`;
+    const cmd = `${ffmpeg} -y -ss ${start.toFixed(2)} -i "${options.inputPath}" -t ${duration.toFixed(2)} -c:v libx264 -preset fast -crf 22 -c:a aac -b:a 192k -movflags +faststart "${options.outputPath}"`;
     await execPromise(cmd);
     return options.outputPath;
   }
@@ -289,30 +372,31 @@ export class VideoProcessor {
       throw new Error(`Source video not found: ${options.inputPath}`);
     }
 
+    const ffmpeg = getFfmpegPath();
     let cmd = '';
 
     if (options.targetAspect === '9:16') {
       if (options.blurBackground) {
         // Complex filtergraph with blurred background fill
         const filter = `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:5[bg];[0:v]scale=1080:1920:force_original_aspect_ratio=decrease[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2[v]`;
-        cmd = `ffmpeg -y -i "${options.inputPath}" -filter_complex "${filter}" -map "[v]" -map 0:a? -c:v libx264 -preset fast -crf 22 -c:a aac -b:a 192k -movflags +faststart "${options.outputPath}"`;
+        cmd = `${ffmpeg} -y -i "${options.inputPath}" -filter_complex "${filter}" -map "[v]" -map 0:a? -c:v libx264 -preset fast -crf 22 -c:a aac -b:a 192k -movflags +faststart "${options.outputPath}"`;
       } else {
         // High quality center-crop to 9:16
         const filter = `scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920`;
-        cmd = `ffmpeg -y -i "${options.inputPath}" -vf "${filter}" -c:v libx264 -preset fast -crf 22 -c:a aac -b:a 192k -movflags +faststart "${options.outputPath}"`;
+        cmd = `${ffmpeg} -y -i "${options.inputPath}" -vf "${filter}" -c:v libx264 -preset fast -crf 22 -c:a aac -b:a 192k -movflags +faststart "${options.outputPath}"`;
       }
     } else if (options.targetAspect === '1:1') {
       if (options.blurBackground) {
         const filter = `[0:v]scale=1080:1080:force_original_aspect_ratio=increase,crop=1080:1080,boxblur=20:5[bg];[0:v]scale=1080:1080:force_original_aspect_ratio=decrease[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2[v]`;
-        cmd = `ffmpeg -y -i "${options.inputPath}" -filter_complex "${filter}" -map "[v]" -map 0:a? -c:v libx264 -preset fast -crf 22 -c:a aac -b:a 192k -movflags +faststart "${options.outputPath}"`;
+        cmd = `${ffmpeg} -y -i "${options.inputPath}" -filter_complex "${filter}" -map "[v]" -map 0:a? -c:v libx264 -preset fast -crf 22 -c:a aac -b:a 192k -movflags +faststart "${options.outputPath}"`;
       } else {
         const filter = `scale=1080:1080:force_original_aspect_ratio=increase,crop=1080:1080`;
-        cmd = `ffmpeg -y -i "${options.inputPath}" -vf "${filter}" -c:v libx264 -preset fast -crf 22 -c:a aac -b:a 192k -movflags +faststart "${options.outputPath}"`;
+        cmd = `${ffmpeg} -y -i "${options.inputPath}" -vf "${filter}" -c:v libx264 -preset fast -crf 22 -c:a aac -b:a 192k -movflags +faststart "${options.outputPath}"`;
       }
     } else {
       // 16:9
       const filter = `scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2`;
-      cmd = `ffmpeg -y -i "${options.inputPath}" -vf "${filter}" -c:v libx264 -preset fast -crf 22 -c:a aac -b:a 192k -movflags +faststart "${options.outputPath}"`;
+      cmd = `${ffmpeg} -y -i "${options.inputPath}" -vf "${filter}" -c:v libx264 -preset fast -crf 22 -c:a aac -b:a 192k -movflags +faststart "${options.outputPath}"`;
     }
 
     await execPromise(cmd);
@@ -334,6 +418,7 @@ export class VideoProcessor {
       throw new Error(`Source video not found: ${options.inputPath}`);
     }
 
+    const ffmpeg = getFfmpegPath();
     let trimOpts = '';
     if (options.startTime !== undefined && options.endTime !== undefined) {
       const dur = options.endTime - options.startTime;
@@ -362,7 +447,7 @@ export class VideoProcessor {
       filter += `,drawtext=text='${cleanText}':fontcolor=white:fontsize=38:box=1:boxcolor=black@0.75:boxborderw=12:x=(w-text_w)/2:y=h-240:enable='between(t,0,3.5)'`;
     }
 
-    const cmd = `ffmpeg -y ${trimOpts} -i "${options.inputPath}" -vf "${filter}" -c:v libx264 -preset fast -crf 21 -c:a aac -b:a 192k -movflags +faststart "${options.outputPath}"`;
+    const cmd = `${ffmpeg} -y ${trimOpts} -i "${options.inputPath}" -vf "${filter}" -c:v libx264 -preset fast -crf 21 -c:a aac -b:a 192k -movflags +faststart "${options.outputPath}"`;
     await execPromise(cmd);
     return options.outputPath;
   }
@@ -374,7 +459,7 @@ export class VideoProcessor {
     if (!fs.existsSync(inputPath)) {
       throw new Error(`Source video not found: ${inputPath}`);
     }
-    const cmd = `ffmpeg -y -i "${inputPath}" -vn -ar 16000 -ac 1 -b:a 64k "${outputPath}"`;
+    const cmd = `${getFfmpegPath()} -y -i "${inputPath}" -vn -ar 16000 -ac 1 -b:a 64k "${outputPath}"`;
     await execPromise(cmd);
     return outputPath;
   }
@@ -387,7 +472,7 @@ export class VideoProcessor {
     if (!fs.existsSync(filePath)) return filePath;
     try {
       const { stdout } = await execPromise(
-        `ffprobe -v quiet -print_format json -show_streams -show_format "${filePath}"`
+        `${getFfprobePath()} -v quiet -print_format json -show_streams -show_format "${filePath}"`
       );
       const data = JSON.parse(stdout);
       const videoStream = data.streams?.find((s: any) => s.codec_type === 'video');
@@ -402,7 +487,7 @@ export class VideoProcessor {
 
       // Transcode safely in-place to browser-standard yuv420p MP4
       const tempOut = `${filePath}.normalized.mp4`;
-      const cmd = `ffmpeg -y -i "${filePath}" -c:v libx264 -pix_fmt yuv420p -profile:v high -level 4.0 -c:a aac -b:a 192k -movflags +faststart "${tempOut}"`;
+      const cmd = `${getFfmpegPath()} -y -i "${filePath}" -c:v libx264 -pix_fmt yuv420p -profile:v high -level 4.0 -c:a aac -b:a 192k -movflags +faststart "${tempOut}"`;
       await execPromise(cmd);
       if (fs.existsSync(tempOut) && fs.statSync(tempOut).size > 0) {
         fs.renameSync(tempOut, filePath);
@@ -419,7 +504,7 @@ export class VideoProcessor {
    */
   public async generateSampleVideo(outputPath: string): Promise<string> {
     if (fs.existsSync(outputPath)) return outputPath;
-    const cmd = `ffmpeg -y -f lavfi -i "color=c=#0f172a:size=1920x1080:d=15:rate=30" \
+    const cmd = `${getFfmpegPath()} -y -f lavfi -i "color=c=#0f172a:size=1920x1080:d=15:rate=30" \
       -f lavfi -i "sine=frequency=220:duration=15" \
       -vf "drawbox=x=160:y=160:w=1600:h=760:color=#1e293b@0.8:t=fill,drawbox=x=160:y=160:w=1600:h=760:color=#4f46e5:t=4,drawtext=text='CREATORAI STUDIO':fontsize=54:fontcolor=#4f46e5:x=220:y=240,drawtext=text='Episode 14 - Autonomous Content Repurposing':fontsize=36:fontcolor=white:x=220:y=330,drawtext=text='Discussing 9\\\\:16 vertical adaptation, retention models, and viral hooks':fontsize=28:fontcolor=#94a3b8:x=220:y=400,drawbox=x=220:y=500:w=1480:h=4:color=#334155:t=fill,drawtext=text='Host\\\\: Alex Rivera   •   Guest\\\\: Dr. Elena Vance':fontsize=24:fontcolor=#cbd5e1:x=220:y=540,drawtext=text='LIVE AUDIO MASTER  •  1080p 30fps':fontsize=22:fontcolor=#10b981:x=220:y=600" \
       -c:v libx264 -pix_fmt yuv420p -c:a aac -b:a 192k -movflags +faststart "${outputPath}"`;

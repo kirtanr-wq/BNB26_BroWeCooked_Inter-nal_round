@@ -118,7 +118,19 @@ export default function App() {
     } catch {}
     return 'home';
   });
-  const [activeNav, setActiveNav] = useState<NavTab>('Home');
+  const getNavTabForScreen = (screen: ScreenId): NavTab => {
+    if (screen === 'dashboard') return 'Home';
+    if (screen === 'create_project') return 'Projects';
+    if (screen === 'workflow') return 'Workflow';
+    if (screen === 'assets') return 'Assets';
+    if (screen === 'analytics') return 'Analytics';
+    if (['repurpose', 'adapt', 'suggestions', 'clip_editor', 'transcript', 'hooks', 'captions', 'processing', 'ai_progress', 'export'].includes(screen)) {
+      return 'AI Tools';
+    }
+    return 'Home';
+  };
+
+  const [activeNav, setActiveNav] = useState<NavTab>(() => getNavTabForScreen(currentScreen));
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
     try {
       return Boolean(localStorage.getItem('creatorai_auth_token'));
@@ -134,18 +146,8 @@ export default function App() {
     setCurrentScreen(screen);
     window.scrollTo({ top: 0, behavior: 'smooth' });
 
-    // Sync top navigation tab
-    if (['dashboard', 'create_project'].includes(screen)) {
-      setActiveNav('Home');
-    } else if (['workflow'].includes(screen)) {
-      setActiveNav('Projects');
-    } else if (['repurpose', 'adapt', 'suggestions', 'clip_editor', 'transcript', 'hooks', 'captions', 'processing', 'ai_progress'].includes(screen)) {
-      setActiveNav('AI Tools');
-    } else if (['assets'].includes(screen)) {
-      setActiveNav('Assets');
-    } else if (['analytics'].includes(screen)) {
-      setActiveNav('Analytics');
-    }
+    // Accurately sync top navigation tab to the active screen
+    setActiveNav(getNavTabForScreen(screen));
   };
 
   const handleLogin = () => {

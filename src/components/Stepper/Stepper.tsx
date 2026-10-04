@@ -17,6 +17,7 @@ export interface StepperProps {
   children: ReactNode;
   initialStep?: number;
   onStepChange?: (step: number) => void;
+  onBeforeStepAdvance?: (step: number) => Promise<boolean> | boolean;
   onFinalStepCompleted?: () => void;
   stepCircleContainerClassName?: string;
   stepContainerClassName?: string;
@@ -40,6 +41,7 @@ export default function Stepper({
   children,
   initialStep = 1,
   onStepChange = () => {},
+  onBeforeStepAdvance,
   onFinalStepCompleted = () => {},
   stepCircleContainerClassName = '',
   stepContainerClassName = '',
@@ -56,6 +58,7 @@ export default function Stepper({
 }: StepperProps) {
   const [currentStep, setCurrentStep] = useState(initialStep);
   const [direction, setDirection] = useState(0);
+  const [isValidating, setIsValidating] = useState(false);
   const stepsArray = Children.toArray(children);
   const totalSteps = stepsArray.length;
   const isCompleted = currentStep > totalSteps;
@@ -77,16 +80,36 @@ export default function Stepper({
     }
   };
 
-  const handleNext = () => {
-    if (!isLastStep) {
+  const handleNext = async () => {
+    if (!isLastStep && !isValidating) {
+      if (onBeforeStepAdvance) {
+        setIsValidating(true);
+        try {
+          const canAdvance = await onBeforeStepAdvance(currentStep);
+          if (!canAdvance) return;
+        } finally {
+          setIsValidating(false);
+        }
+      }
       setDirection(1);
       updateStep(currentStep + 1);
     }
   };
 
-  const handleComplete = () => {
-    setDirection(1);
-    updateStep(totalSteps + 1);
+  const handleComplete = async () => {
+    if (!isValidating) {
+      if (onBeforeStepAdvance) {
+        setIsValidating(true);
+        try {
+          const canAdvance = await onBeforeStepAdvance(currentStep);
+          if (!canAdvance) return;
+        } finally {
+          setIsValidating(false);
+        }
+      }
+      setDirection(1);
+      updateStep(totalSteps + 1);
+    }
   };
 
   return (

@@ -20,6 +20,8 @@ export interface DBProject {
   name: string;
   description?: string;
   status: 'draft' | 'processing' | 'ready' | 'exported';
+  targetPlatform?: string;
+  aspectRatio?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -35,6 +37,8 @@ export interface DBAsset {
   mimeType: string;
   fileSize: number;
   assetType: 'video' | 'clip' | 'audio' | 'transcript' | 'image';
+  status?: 'draft' | 'ready' | 'processing' | 'published' | 'shared' | 'analyzed';
+  targetChannels?: string[];
   duration?: number;
   width?: number;
   height?: number;
@@ -142,11 +146,30 @@ export class DatabaseService {
   private data: DatabaseSchema;
 
   constructor() {
-    const dataDir = path.join(process.cwd(), 'uploads');
+    // Dedicated private data directory - isolated from public media uploads
+    const dataDir = path.join(process.cwd(), 'data');
     if (!fs.existsSync(dataDir)) {
       fs.mkdirSync(dataDir, { recursive: true });
     }
     this.dbFilePath = path.join(dataDir, 'creatorai_database.json');
+
+    // Automatically migrate legacy uploads/ database to secure data directory if needed
+    const legacyPath = path.join(process.cwd(), 'uploads', 'creatorai_database.json');
+    if (!fs.existsSync(this.dbFilePath) && fs.existsSync(legacyPath)) {
+      try {
+        fs.copyFileSync(legacyPath, this.dbFilePath);
+        fs.unlinkSync(legacyPath);
+        console.log('🔒 Migrated database file to secure /data directory.');
+      } catch (err: any) {
+        console.warn('Database migration notice:', err.message);
+      }
+    } else if (fs.existsSync(legacyPath)) {
+      // Remove public copy to prevent exposure
+      try {
+        fs.unlinkSync(legacyPath);
+      } catch {}
+    }
+
     this.data = this.loadDatabase();
 
     // Check if Supabase credentials are provided
@@ -230,16 +253,29 @@ export class DatabaseService {
   // AUTHENTICATION & PROFILES
   // ==========================================
 
+  public checkUserExists(email: string): boolean {
+    if (!email) return false;
+    const cleanEmail = email.toLowerCase().trim();
+    return Object.values(this.data.users).some(
+      (u) => u.email.toLowerCase() === cleanEmail
+    );
+  }
+
   public async registerUser(params: {
     username: string;
     email: string;
     password: string;
   }): Promise<{ user: Omit<UserProfile, 'passwordHash'>; token: string }> {
+    const cleanEmail = params.email.toLowerCase().trim();
     const existing = Object.values(this.data.users).find(
-      (u) => u.email.toLowerCase() === params.email.toLowerCase()
+      (u) => u.email.toLowerCase() === cleanEmail
     );
     if (existing) {
-      throw new Error('An account with this email already exists.');
+      throw new Error('An account with this email already exists. Please log in instead.');
+    }
+
+    if (!params.password || params.password.length < 6) {
+      throw new Error('Password must be at least 6 characters long.');
     }
 
     const userId = `usr_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
@@ -248,8 +284,8 @@ export class DatabaseService {
 
     const newUser: UserProfile = {
       id: userId,
-      username: params.username.trim() || 'Creator',
-      email: params.email.toLowerCase().trim(),
+      username: params.username?.trim() || 'Creator',
+      email: cleanEmail,
       passwordHash,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -267,16 +303,17 @@ export class DatabaseService {
     email: string;
     password: string;
   }): Promise<{ user: Omit<UserProfile, 'passwordHash'>; token: string }> {
+    const cleanEmail = params.email.toLowerCase().trim();
     const user = Object.values(this.data.users).find(
-      (u) => u.email.toLowerCase() === params.email.toLowerCase().trim()
+      (u) => u.email.toLowerCase() === cleanEmail
     );
     if (!user) {
-      throw new Error('Invalid email or password.');
+      throw new Error('No account found with this email. Would you like to sign up?');
     }
 
     const isValid = bcrypt.compareSync(params.password, user.passwordHash);
     if (!isValid) {
-      throw new Error('Invalid email or password.');
+      throw new Error('Incorrect password. Please verify and try again.');
     }
 
     const token = this.createSession(user.id);
@@ -346,6 +383,8 @@ export class DatabaseService {
       name: projectData.name,
       description: projectData.description || existing?.description || '',
       status: projectData.status || existing?.status || 'draft',
+      targetPlatform: projectData.targetPlatform || existing?.targetPlatform,
+      aspectRatio: projectData.aspectRatio || existing?.aspectRatio,
       createdAt: existing?.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -395,6 +434,19 @@ export class DatabaseService {
     delete this.data.assets[assetId];
     this.persist();
     return true;
+  }
+
+  public updateAssetStatus(userId: string, assetId: string, status: string): DBAsset | null {
+    let asset = this.data.assets[assetId];
+    if (!asset) {
+      asset = (Object.values(this.data.assets).find(
+        (a) => a.userId === userId && (a.id === assetId || a.filename === assetId)
+      ) as DBAsset) || null;
+    }
+    if (!asset || asset.userId !== userId) return null;
+    asset.status = status as any;
+    this.persist();
+    return asset;
   }
 
   // ==========================================

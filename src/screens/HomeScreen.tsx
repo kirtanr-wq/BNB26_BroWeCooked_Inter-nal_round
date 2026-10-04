@@ -152,7 +152,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({ onNavigate }) => {
                 strokeWidth={1.8}
                 specks={15}
                 selection={true}
-                labels={true}
+                labels={false}
                 draggable={true}
                 sweep={false}
               />

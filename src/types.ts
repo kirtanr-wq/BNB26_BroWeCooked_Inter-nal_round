@@ -17,7 +17,7 @@ export type ScreenId =
   | 'processing'
   | 'ai_progress';
 
-export type NavTab = 'Home' | 'Projects' | 'Assets' | 'AI Tools' | 'Workflow' | 'Analytics' | 'Settings';
+export type NavTab = 'Home' | 'Projects' | 'Assets' | 'AI Tools' | 'Workflow' | 'Analytics';
 
 export interface UserProfile {
   id: string;
@@ -100,6 +100,8 @@ export interface Asset {
   id: string;
   name: string;
   type: 'video' | 'clip' | 'transcript' | 'image' | 'audio';
+  status?: 'draft' | 'ready' | 'processing' | 'published' | 'shared' | 'analyzed';
+  targetChannels?: string[];
   size: string;
   duration?: string;
   resolution?: string;

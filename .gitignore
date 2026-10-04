@@ -7,3 +7,13 @@ coverage/
 .env
 .env*
 !.env.example
+
+# User Data & Storage Directories (Protected & Never deployed publicly)
+data/
+uploads/
+processed/
+scratch/
+creatorai_database.json
+*.db
+*.sqlite
+*.jsonl

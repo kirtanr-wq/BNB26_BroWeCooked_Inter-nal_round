@@ -145,7 +145,7 @@ export const TechText: React.FC<TechTextProps> = ({
   reveal = 'letter',
   specks = 15,
   selection = true,
-  labels = true,
+  labels = false,
   draggable = true,
   sweep = false,
   speed = 1,
@@ -574,7 +574,7 @@ export const TechText: React.FC<TechTextProps> = ({
       const label =
         moved > 1
           ? `${signed(Math.round(glyph.offset.x))}, ${signed(Math.round(-glyph.offset.y))}`
-          : `${glyph.char}  ${Math.round(glyph.box.x2 - glyph.box.x1)} × ${Math.round(glyph.box.y2 - glyph.box.y1)}`;
+          : `${glyph.char}`;
       ctx.fillText(label, Math.round(frame.x1), Math.round(frame.y1) - 7);
     };
 

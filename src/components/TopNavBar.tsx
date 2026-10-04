@@ -125,9 +125,6 @@ export const TopNavBar: React.FC<TopNavBarProps> = ({
       case 'Analytics':
         onNavigate('analytics');
         break;
-      case 'Settings':
-        onNavigate('dashboard');
-        break;
     }
   };
 
@@ -158,7 +155,7 @@ export const TopNavBar: React.FC<TopNavBarProps> = ({
 
           {/* Desktop Navigation Links */}
           <nav className="hidden md:flex items-center space-x-6 h-16">
-            {(['Home', 'Projects', 'Assets', 'AI Tools', 'Workflow', 'Analytics', 'Settings'] as NavTab[]).map((tab) => {
+            {(['Home', 'Projects', 'Assets', 'AI Tools', 'Workflow', 'Analytics'] as NavTab[]).map((tab) => {
               const isActive = activeNav === tab;
               return (
                 <button

@@ -131,6 +131,25 @@ app.get('/api/health', (_req, res) => {
 });
 
 // 2. Auth Endpoints
+app.post('/api/auth/check-email', (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'MISSING_EMAIL', message: 'Email address is required.' },
+      });
+    }
+    const exists = db.checkUserExists(email);
+    res.json({ success: true, exists });
+  } catch (err: any) {
+    res.status(500).json({
+      success: false,
+      error: { code: 'SERVER_ERROR', message: err.message },
+    });
+  }
+});
+
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { username, email, password } = req.body;
@@ -273,6 +292,8 @@ app.post(
         mimeType: file.mimetype,
         fileSize: currentSize,
         assetType: isVideo ? 'video' : file.mimetype.startsWith('audio/') ? 'audio' : 'transcript',
+        status: 'draft',
+        targetChannels: req.body.targetChannels ? JSON.parse(req.body.targetChannels) : undefined,
         duration: metadata.duration,
         width: metadata.width,
         height: metadata.height,
@@ -307,6 +328,19 @@ app.post(
 // 5. Media Streaming with HTTP Byte-Range support & Download attachment
 app.get('/api/media/:filename', (req, res) => {
   const filename = path.basename(req.params.filename);
+
+  // Security guard: Only allow legitimate media/thumbnail/subtitle file extensions
+  const ext = path.extname(filename).toLowerCase();
+  const allowedMediaExts = [
+    '.mp4', '.mov', '.webm', '.m4v', '.mkv', '.avi',
+    '.mp3', '.wav', '.ogg', '.m4a', '.aac',
+    '.jpg', '.jpeg', '.png', '.webp', '.gif',
+    '.vtt', '.srt', '.txt'
+  ];
+  if (!allowedMediaExts.includes(ext) || filename.includes('database') || filename.includes('.env')) {
+    return res.status(403).json({ success: false, error: { message: 'Access forbidden: protected file type.' } });
+  }
+
   let filePath = path.join(uploadsDir, filename);
   if (!fs.existsSync(filePath)) {
     filePath = path.join(processedDir, filename);
@@ -325,7 +359,6 @@ app.get('/api/media/:filename', (req, res) => {
   const fileSize = stat.size;
   const range = req.headers.range;
 
-  const ext = path.extname(filePath).toLowerCase();
   const contentType =
     ext === '.mp4' ? 'video/mp4' :
     ext === '.webm' ? 'video/webm' :
@@ -374,19 +407,33 @@ function resolveMediaFile(filename: string): string | null {
 // 6. Video Trimming Endpoint
 app.post('/api/video/trim', optionalAuth, async (req: AuthenticatedRequest, res) => {
   try {
-    const { filename, startTime, endTime, clipTitle, projectId } = req.body;
-    if (!filename) {
-      return res.status(400).json({
-        success: false,
-        error: { code: 'MISSING_PARAM', message: 'Source filename is required.' },
-      });
+    const { filename, assetId: reqAssetId, startTime, endTime, clipTitle, projectId, targetAspect, blurBackground } = req.body;
+    let targetFilename = filename;
+
+    if (!targetFilename && reqAssetId) {
+      const asset = db.getAssetById(req.user!.id, reqAssetId);
+      if (asset) targetFilename = asset.filename || asset.originalName;
     }
 
-    const inputPath = resolveMediaFile(filename);
+    let inputPath = targetFilename ? resolveMediaFile(targetFilename) : null;
+
+    if (!inputPath) {
+      const candidateId = reqAssetId || targetFilename;
+      if (candidateId) {
+        const asset = db.getAssetById(req.user!.id, candidateId);
+        if (asset) {
+          if (asset.filename) inputPath = resolveMediaFile(asset.filename);
+          if (!inputPath && asset.storagePath && fs.existsSync(asset.storagePath)) {
+            inputPath = asset.storagePath;
+          }
+        }
+      }
+    }
+
     if (!inputPath) {
       return res.status(404).json({
         success: false,
-        error: { code: 'NOT_FOUND', message: `Source file '${filename}' not found.` },
+        error: { code: 'NOT_FOUND', message: `Source file '${filename || reqAssetId || 'unspecified'}' not found.` },
       });
     }
 
@@ -399,7 +446,8 @@ app.post('/api/video/trim', optionalAuth, async (req: AuthenticatedRequest, res)
       });
     }
 
-    const outFilename = `clip_${Date.now()}_${Math.round(start)}s_to_${Math.round(end)}s.mp4`;
+    const aspectTag = targetAspect ? `_${String(targetAspect).replace(':', 'x')}` : '';
+    const outFilename = `clip_${Date.now()}_${Math.round(start)}s_to_${Math.round(end)}s${aspectTag}.mp4`;
     const outputPath = path.join(processedDir, outFilename);
 
     await videoProcessor.trimVideo({
@@ -407,6 +455,8 @@ app.post('/api/video/trim', optionalAuth, async (req: AuthenticatedRequest, res)
       outputPath,
       startTime: start,
       endTime: end,
+      targetAspect,
+      blurBackground: !!blurBackground,
     });
 
     const meta = await videoProcessor.getMetadata(outputPath);
@@ -447,6 +497,7 @@ app.post('/api/video/trim', optionalAuth, async (req: AuthenticatedRequest, res)
       width: meta.width,
       height: meta.height,
       fps: meta.fps,
+      aspect: targetAspect || (meta.width && meta.height ? `${meta.width}:${meta.height}` : '16:9'),
       hasAudio: meta.hasAudio,
       thumbnail: thumbUrl,
       thumbnailUrl: thumbUrl,
@@ -867,6 +918,8 @@ app.get('/api/assets', optionalAuth, async (req: AuthenticatedRequest, res) => {
 
   const hydrated = assets.map((a) => ({
     ...a,
+    type: a.assetType,
+    status: a.status || 'draft',
     url: `/api/media/${a.filename}`,
     previewUrl: `/api/media/${a.filename}`,
     thumbnail: a.thumbnail || (a.thumbnailUrl || undefined),
@@ -877,6 +930,15 @@ app.get('/api/assets', optionalAuth, async (req: AuthenticatedRequest, res) => {
 app.delete('/api/assets/:id', optionalAuth, (req: AuthenticatedRequest, res) => {
   const ok = db.deleteAsset(req.user!.id, req.params.id);
   res.json({ success: ok });
+});
+
+app.patch('/api/assets/:id', optionalAuth, (req: AuthenticatedRequest, res) => {
+  const { status } = req.body;
+  const updated = db.updateAssetStatus(req.user!.id, req.params.id, status);
+  if (!updated) {
+    return res.status(404).json({ success: false, error: { message: 'Asset not found' } });
+  }
+  res.json({ success: true, asset: updated });
 });
 
 // 14. Projects Database (RLS Scoped)
@@ -1074,6 +1136,7 @@ async function startServer() {
         middlewareMode: true,
         watch: {
           ignored: [
+            '**/data/**',
             '**/uploads/**',
             '**/processed/**',
             '**/scratch/**',
